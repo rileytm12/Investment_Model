@@ -1,6 +1,0 @@
-pandas
-statsmodels
-alpaca-py
-google-genai
-pydantic
-python-dotenv
