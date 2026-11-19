@@ -9,6 +9,8 @@ from .config import (
     GEMINI_API_KEY,
     HOLDING_LIMIT_HOURS,
     PROFIT_TARGET_PCT,
+    Z_SCORE_ENTRY_THRESHOLD,
+    Z_SCORE_EXIT_THRESHOLD,
 )
 
 PRIMARY_MODEL = "gemini-3.8-flash"
@@ -25,17 +27,63 @@ class MarketAnalyzer:
     def __init__(self):
         self.client = genai.Client(api_key=GEMINI_API_KEY)
 
+    def _passes_deterministic_gate(self, market_state: dict) -> tuple[bool, str]:
+        z_score = market_state.get("z_score")
+        current_shares = market_state.get("current_shares", 0)
+        current_price = market_state.get("current_price")
+        entry_price = market_state.get("entry_price")
+        hours_held = market_state.get("hours_held")
+        profit_target_pct = market_state.get("profit_target_pct", PROFIT_TARGET_PCT)
+        holding_limit_hours = market_state.get("holding_limit_hours", HOLDING_LIMIT_HOURS)
+
+        if z_score is None:
+            return False, "Insufficient data for Z-score calculation; holding locally."
+
+        if current_shares == 0:
+            if z_score <= Z_SCORE_ENTRY_THRESHOLD:
+                return True, f"Z-score ({z_score:.2f}) <= entry threshold ({Z_SCORE_ENTRY_THRESHOLD})."
+            return (
+                False,
+                f"Flat position with Z-score ({z_score:.2f}) > entry threshold ({Z_SCORE_ENTRY_THRESHOLD}); holding locally.",
+            )
+
+        profit_target_hit = (
+            entry_price is not None
+            and current_price is not None
+            and current_price >= entry_price * (1 + profit_target_pct)
+        )
+        holding_limit_hit = hours_held is not None and hours_held >= holding_limit_hours
+        z_exit_hit = z_score >= Z_SCORE_EXIT_THRESHOLD
+
+        if z_exit_hit or profit_target_hit or holding_limit_hit:
+            return True, "Exit or risk condition triggered; escalating to LLM for confirmation."
+
+        return (
+            False,
+            f"Open position within limits (Z-score {z_score:.2f} < {Z_SCORE_EXIT_THRESHOLD}, target/time limits not met); holding locally.",
+        )
+
     def evaluate_position(self, market_state: dict, max_retries: int = 4) -> TradeDecision:
+        should_call_llm, gate_reason = self._passes_deterministic_gate(market_state)
+        if not should_call_llm:
+            return TradeDecision(
+                action="HOLD",
+                confidence=1.0,
+                reasoning=gate_reason,
+            )
+
         prompt = f"""
         You are evaluating a short-term mean-reversion position on a low-beta equity.
         Rules:
         - Target profit per trade: {PROFIT_TARGET_PCT * 100:.1f}%
         - Maximum holding window: {HOLDING_LIMIT_HOURS} hours
         - Minimum required confidence to act: {CONFIDENCE_THRESHOLD:.2f}
-        - If holding a position and current_price >= entry_price * (1 + profit_target_pct),
-          strongly consider SELL to capture the target gain.
+        - Entry Z-score threshold: {Z_SCORE_ENTRY_THRESHOLD}
+        - Exit Z-score threshold: {Z_SCORE_EXIT_THRESHOLD}
+        - If holding a position and (current_price >= entry_price * (1 + profit_target_pct) or z_score >= {Z_SCORE_EXIT_THRESHOLD}),
+          strongly consider SELL to capture the target gain or mean reversion.
         - If hours_held >= holding_limit_hours, prioritize exiting or reviewing per risk rules.
-        - Look for local dips relative to SMA_60 / negative Z_Score for BUY entries when flat.
+        - Confirm BUY entries when flat only if Z-score <= {Z_SCORE_ENTRY_THRESHOLD} represents a valid mean-reversion dip.
 
         Market State:
         {json.dumps(market_state, indent=2)}
