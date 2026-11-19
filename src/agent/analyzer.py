@@ -1,7 +1,9 @@
 import json
+import time
 from typing import Literal
 from google import genai
 from google.genai import types
+from google.genai.errors import APIError
 from pydantic import BaseModel, Field
 from .config import (
     CONFIDENCE_THRESHOLD,
@@ -21,7 +23,7 @@ class MarketAnalyzer:
     def __init__(self):
         self.client = genai.Client(api_key=GEMINI_API_KEY)
 
-    def evaluate_position(self, market_state: dict) -> TradeDecision:
+    def evaluate_position(self, market_state: dict, max_retries: int = 3) -> TradeDecision:
         prompt = f"""
         You are evaluating a short-term mean-reversion position on a low-beta equity.
         Rules:
@@ -36,13 +38,22 @@ class MarketAnalyzer:
         Market State:
         {json.dumps(market_state, indent=2)}
         """
-        response = self.client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=TradeDecision,
-                temperature=0.1,
-            ),
-        )
-        return TradeDecision.model_validate_json(response.text)
+        for attempt in range(max_retries):
+            try:
+                response = self.client.models.generate_content(
+                    model="gemini-3.8-flash",
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=TradeDecision,
+                        temperature=0.1,
+                    ),
+                )
+                return TradeDecision.model_validate_json(response.text)
+            except APIError as exc:
+                if exc.code == 503 and attempt < max_retries - 1:
+                    wait_seconds = 2 ** (attempt + 1)
+                    print(f"Model busy (503). Retrying in {wait_seconds}s...")
+                    time.sleep(wait_seconds)
+                else:
+                    raise
