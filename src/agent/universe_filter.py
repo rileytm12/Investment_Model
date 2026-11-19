@@ -10,6 +10,6 @@ class UniverseFilter:
         dropna_series = price_series.dropna()
         if len(dropna_series) < 60:
             return False
-        result = adfuller(dropna_series)
+        result = adfuller(dropna_series, result_object=False)
         p_value = result[1]
         return bool(p_value < p_value_threshold)
