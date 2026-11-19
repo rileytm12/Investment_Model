@@ -3,7 +3,6 @@ import time
 from typing import Literal
 from google import genai
 from google.genai import types
-from google.genai.errors import APIError
 from pydantic import BaseModel, Field
 from .config import (
     CONFIDENCE_THRESHOLD,
@@ -11,6 +10,9 @@ from .config import (
     HOLDING_LIMIT_HOURS,
     PROFIT_TARGET_PCT,
 )
+
+PRIMARY_MODEL = "gemini-3.8-flash"
+FALLBACK_MODEL = "gemini-2.5-flash"
 
 
 class TradeDecision(BaseModel):
@@ -23,7 +25,7 @@ class MarketAnalyzer:
     def __init__(self):
         self.client = genai.Client(api_key=GEMINI_API_KEY)
 
-    def evaluate_position(self, market_state: dict, max_retries: int = 3) -> TradeDecision:
+    def evaluate_position(self, market_state: dict, max_retries: int = 4) -> TradeDecision:
         prompt = f"""
         You are evaluating a short-term mean-reversion position on a low-beta equity.
         Rules:
@@ -38,10 +40,12 @@ class MarketAnalyzer:
         Market State:
         {json.dumps(market_state, indent=2)}
         """
+        last_error = None
         for attempt in range(max_retries):
+            model_to_use = PRIMARY_MODEL if attempt < max_retries - 1 else FALLBACK_MODEL
             try:
                 response = self.client.models.generate_content(
-                    model="gemini-3.8-flash",
+                    model=model_to_use,
                     contents=prompt,
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json",
@@ -50,10 +54,14 @@ class MarketAnalyzer:
                     ),
                 )
                 return TradeDecision.model_validate_json(response.text)
-            except APIError as exc:
-                if exc.code == 503 and attempt < max_retries - 1:
-                    wait_seconds = 2 ** (attempt + 1)
-                    print(f"Model busy (503). Retrying in {wait_seconds}s...")
+            except Exception as exc:
+                last_error = exc
+                if attempt < max_retries - 1:
+                    wait_seconds = min(3 * (2 ** attempt), 15)
+                    print(
+                        f"Transient error on {model_to_use} ({exc}). "
+                        f"Retrying in {wait_seconds}s..."
+                    )
                     time.sleep(wait_seconds)
                 else:
-                    raise
+                    raise last_error
