@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 from alpaca.trading.client import TradingClient
+from alpaca.trading.enums import OrderSide, QueryOrderStatus
+from alpaca.trading.requests import GetOrdersRequest
 from .config import ALPACA_KEY, ALPACA_SECRET, HOLDING_LIMIT_HOURS
 
 
@@ -8,16 +10,19 @@ class PositionMonitor:
         self.trading_client = TradingClient(ALPACA_KEY, ALPACA_SECRET, paper=True)
 
     def get_hours_held(self, symbol: str) -> float | None:
-        activities = self.trading_client.get_account_activities(activity_types=["FILL"])
-        for activity in activities:
-            if getattr(activity, "symbol", None) == symbol and getattr(activity, "side", None) == "buy":
-                tx_time = getattr(activity, "transaction_time", None)
-                if tx_time is not None:
-                    if tx_time.tzinfo is None:
-                        tx_time = tx_time.replace(tzinfo=timezone.utc)
-                    elapsed = datetime.now(timezone.utc) - tx_time
-                    return round(elapsed.total_seconds() / 3600.0, 2)
-                break
+        request = GetOrdersRequest(
+            status=QueryOrderStatus.CLOSED,
+            side=OrderSide.BUY,
+            limit=50,
+        )
+        orders = self.trading_client.get_orders(request)
+        for order in orders:
+            if getattr(order, "symbol", None) == symbol and getattr(order, "filled_at", None) is not None:
+                filled_time = order.filled_at
+                if filled_time.tzinfo is None:
+                    filled_time = filled_time.replace(tzinfo=timezone.utc)
+                elapsed = datetime.now(timezone.utc) - filled_time
+                return round(elapsed.total_seconds() / 3600.0, 2)
         return None
 
     def check_holding_limits(self, symbol: str) -> bool:
