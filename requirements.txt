@@ -1,4 +1,5 @@
 pandas
+numpy
 statsmodels
 alpaca-py
 google-genai
